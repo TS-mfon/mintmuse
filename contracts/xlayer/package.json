@@ -1,0 +1,17 @@
+{
+  "name": "mintmuse-contracts",
+  "private": true,
+  "scripts": {
+    "deploy": "hardhat run scripts/deploy.js --network xlayer",
+    "deploy:testnet": "hardhat run scripts/deploy.js --network xlayerTestnet"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-ethers": "^3.0.6",
+    "dotenv": "^16.4.5",
+    "hardhat": "^2.22.10"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.2",
+    "ethers": "^6.13.2"
+  }
+}

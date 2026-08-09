@@ -1,0 +1,14 @@
+{
+  "name": "mintmuse-genlayer-deploy",
+  "type": "module",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Deploys CreatorMuse.py to GenLayer StudioNet. Uses genlayer-js SDK directly (no global CLI).",
+  "scripts": {
+    "deploy": "node deploy.mjs",
+    "deploy:test": "node deploy.mjs --dry-run"
+  },
+  "dependencies": {
+    "genlayer-js": "^1.1.8"
+  }
+}

@@ -6,3 +6,5 @@ node_modules
 contracts/genlayer/deploy/.env
 *.log
 deployments.json
+
+.vercel

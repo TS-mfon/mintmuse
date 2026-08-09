@@ -25,5 +25,5 @@ export interface Concept {
 export interface GenerateResult {
   concept: Concept;
   artUrl: string;
-  source: "genlayer" | "pollinations";
+  source: "genlayer" | "pollinations" | "ai" | "template";
 }

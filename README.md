@@ -1,7 +1,7 @@
 # MintMuse 🪐 — AI Creator Coins
 
 Turn an X (Twitter) persona into a fair-launch creator coin. MintMuse reads a
-creator's **public** X profile (no API key, no X login), an AI brain writes the
+creator's **public** X profile, verifies ownership with a temporary X bio code, and a GenLayer AI brain writes the
 coin's lore, tokenomics and artwork, and the coin is deployed as a
 **bonding-curve ERC20 on X Layer**. The wallet that mints is bound on-chain to
 the X handle.
@@ -19,8 +19,8 @@ the X handle.
 │  - Wallet login         │
 │  - Animated mint flow   │
 └───────────┬─────────────┘
-            │  /api/xprofile  (server-side X fetch: OG tags + Jina Reader)
-            │  /api/generate  (AI concept)
+            │  /api/xprofile + /api/verify (public profile + bio proof)
+            │  /api/generate  (required GenLayer consensus)
             ▼
    ┌──────────────────┐        ┌──────────────────────────┐
    │ GenLayer         │        │ X Layer (EVM)            │
@@ -29,7 +29,7 @@ the X handle.
    │ AI: LLM exec     │        │ CreatorCoinFactory.sol   │  deploy per handle
    └──────────────────┘        └──────────────────────────┘
             │                              ▲
-            │ fallback: Pollinations       │ createCoin(handle,name,ticker,artUrl)
+            │ artwork: Pollinations         │ createCoin(handle,name,ticker,artUrl)
             ▼                              │
    Pollinations (free text+image) ────────┘
 ```
@@ -37,9 +37,9 @@ the X handle.
 - **AI brain (GenLayer):** `contracts/genlayer/CreatorMuse.py` deployed **only** to
   GenLayer StudioNet (chain 61999, RPC `https://studio.genlayer.com/api`). Uses
   GenLayer's native LLM execution to produce the coin concept JSON.
-- **Fallback (free, no key):** until the GenLayer contract is live
-  (`GENLAYER_ENABLED=false`), the app uses Pollinations for both the concept text
-  and the artwork, so it stays **fully functional** out of the box.
+- **Generation policy:** production generation is fail-closed. If GenLayer is not
+  configured or consensus fails, the app preserves the verified profile and asks
+  the user to retry; it never silently substitutes template lore.
 - **Coins + binding (X Layer):** Solidity contracts deployed to X Layer.
 
 ---
@@ -49,9 +49,10 @@ the X handle.
 ```bash
 cd contracts/xlayer
 npm install
-export XLAYER_RPC=https://rpc.xlayer.tech
+export XLAYER_TESTNET_RPC=https://testrpc.xlayer.tech
 export DEPLOYER_PK=0xYOUR_PRIVATE_KEY   # funded with OKB for gas
-npx hardhat run scripts/deploy.js --network xlayer
+export VERIFIER_ADDRESS=0xPUBLIC_ADDRESS_FOR_VERIFIER_PRIVATE_KEY
+npx hardhat run scripts/deploy.js --network xlayerTestnet
 ```
 
 Copy the printed addresses into Vercel env:
@@ -84,13 +85,16 @@ with `next build` automatically.
 | Var | Where | Purpose |
 |---|---|---|
 | `NEXT_PUBLIC_XLAYER_RPC` | Vercel | X Layer RPC |
-| `NEXT_PUBLIC_XLAYER_CHAIN_ID` | Vercel | `195` |
+| `NEXT_PUBLIC_XLAYER_CHAIN_ID` | Vercel | `1952` |
+| `NEXT_PUBLIC_XLAYER_EXPLORER` | Vercel | X Layer testnet explorer base URL |
 | `NEXT_PUBLIC_REGISTRY_ADDRESS` | Vercel | deployed `UsernameRegistry` |
 | `NEXT_PUBLIC_FACTORY_ADDRESS` | Vercel | deployed `CreatorCoinFactory` |
 | `GENLAYER_RPC` | Vercel | StudioNet RPC |
-| `GENLAYER_ENABLED` | Vercel | `true` once GenLayer contract is live |
+| `GENLAYER_ENABLED` | Vercel | must be `true` for generation |
 | `GENLAYER_CONTRACT_ADDRESS` | Vercel | deployed `CreatorMuse` |
-| `POLLINATIONS_TEXT_MODEL` / `POLLINATIONS_IMAGE_MODEL` | Vercel | free fallback models |
+| `VERIFICATION_SECRET` | Vercel | HMAC secret for stateless bio challenges |
+| `VERIFIER_PRIVATE_KEY` | Vercel | signs short-lived on-chain ownership attestations |
+| `POLLINATIONS_IMAGE_MODEL` | Vercel | artwork model after GenLayer concept consensus |
 
 ---
 
@@ -98,9 +102,10 @@ with `next build` automatically.
 
 1. **Connect wallet** (MetaMask / OKX Wallet) — required to enter.
 2. **Enter X handle** → app fetches public profile (name, bio, followers, recent posts).
-3. **Bind handle** → `UsernameRegistry.register(handle)` links handle↔wallet on X Layer.
-4. **Generate** → AI writes lore + tokenomics + art prompt, Pollinations renders the art.
-5. **Deploy** → `CreatorCoinFactory.createCoin(...)` mints the bonding-curve token.
+3. **Verify ownership** → add a temporary code to the X bio and receive a signed attestation.
+4. **Bind handle** → `UsernameRegistry.register(...)` verifies the attestation on X Layer.
+5. **Generate** → GenLayer writes lore + constrained tokenomics; Pollinations renders the art.
+6. **Deploy** → `CreatorCoinFactory.createCoin(...)` mints the bonding-curve token.
 
 ---
 
@@ -113,3 +118,9 @@ with `next build` automatically.
 - GenLayer Python intelligent contract
 
 No database, no backend server — only GitHub + Vercel.
+
+## Current testnet deployments
+
+- X Layer UsernameRegistry: `0x8864ad5224738db9C8807B2796476a5cfF960Fc8`
+- X Layer CreatorCoinFactory: `0xFdA1e070f5D6cb6c26676A138a04634BB943aBef`
+- GenLayer StudioNet CreatorMuse: `0x294cd7E68deD3250A17A115f35aE8a8fE72B904F`

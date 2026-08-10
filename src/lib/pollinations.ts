@@ -1,4 +1,4 @@
-// Free, key-less AI via Pollinations. Used for (a) the fallback concept
+// Free, key-less artwork generation via Pollinations after GenLayer consensus.
 // generator and (b) turning the art prompt into an image URL.
 
 export async function pollinationsText(prompt: string, model = "openai-large"): Promise<string> {

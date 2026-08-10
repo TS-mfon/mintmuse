@@ -1,6 +1,14 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 from genlayer import *
 import json
+from dataclasses import dataclass
+
+
+@allow_storage
+@dataclass
+class ConceptRequest:
+    handle: str
+    concept: str
 
 
 class CreatorMuse(gl.Contract):
@@ -11,16 +19,15 @@ class CreatorMuse(gl.Contract):
     token name, ticker, narrative, tokenomics and an image prompt for the art.
     """
 
-    last_handle: str
-    last_concept: str  # JSON string
+    requests: TreeMap[str, ConceptRequest]
 
     def __init__(self):
-        self.last_handle = ""
-        self.last_concept = "{}"
+        self.requests = TreeMap[str, ConceptRequest]()
 
     @gl.public.write
     def generate(
         self,
+        request_id: str,
         handle: str,
         display_name: str,
         bio: str,
@@ -67,13 +74,19 @@ Recent posts (truncated): {recent_text[:2000]}
                 return False
 
         result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
-        self.last_handle = handle
-        self.last_concept = json.dumps(result.calldata)
+        self.requests[request_id] = ConceptRequest(
+            handle=handle,
+            concept=json.dumps(result.calldata),
+        )
 
     @gl.public.view
-    def get_concept(self) -> str:
-        return self.last_concept
+    def get_concept(self, request_id: str) -> str:
+        if request_id not in self.requests:
+            return ""
+        return self.requests[request_id].concept
 
     @gl.public.view
-    def get_handle(self) -> str:
-        return self.last_handle
+    def get_handle(self, request_id: str) -> str:
+        if request_id not in self.requests:
+            return ""
+        return self.requests[request_id].handle

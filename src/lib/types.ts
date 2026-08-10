@@ -6,6 +6,7 @@ export interface XProfile {
   followers?: number | null;
   following?: number | null;
   recentText?: string;
+  fetchedAt?: string;
 }
 
 export interface Concept {
@@ -25,5 +26,14 @@ export interface Concept {
 export interface GenerateResult {
   concept: Concept;
   artUrl: string;
-  source: "genlayer" | "pollinations" | "ai" | "template";
+  source: "genlayer";
+  requestId?: string;
+}
+
+export interface VerificationChallenge {
+  handle: string;
+  wallet: `0x${string}`;
+  code: string;
+  nonce: `0x${string}`;
+  expiresAt: number;
 }

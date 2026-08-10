@@ -8,3 +8,4 @@ contracts/genlayer/deploy/.env
 deployments.json
 
 .vercel
+.env*

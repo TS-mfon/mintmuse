@@ -13,7 +13,7 @@ const TTL = 1000 * 60 * 30;
  */
 export async function GET(req: NextRequest) {
   const raw = req.nextUrl.searchParams.get("handle");
-  const handle = raw?.replace(/^@/, "").trim();
+  const handle = raw?.replace(/^@/, "").trim().toLowerCase();
   if (!handle) return NextResponse.json({ error: "missing handle" }, { status: 400 });
 
   const hit = cache.get(handle);
@@ -27,6 +27,7 @@ export async function GET(req: NextRequest) {
     followers: null,
     following: null,
     recentText: "",
+    fetchedAt: new Date().toISOString(),
   };
 
   // 1) Primary: fxtwitter (free, no auth)
@@ -89,6 +90,9 @@ export async function GET(req: NextRequest) {
   }
 
   cache.set(handle, { ts: Date.now(), data });
+  if (!data.displayName && !data.bio && !data.avatar) {
+    return NextResponse.json({ error: "profile_not_found", handle }, { status: 404 });
+  }
   return NextResponse.json(data);
 }
 

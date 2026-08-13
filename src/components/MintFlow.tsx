@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { decodeEventLog, isAddress } from "viem";
-import { useAccount, useChainId, useReadContract, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
+import { useAccount, useChainId, usePublicClient, useReadContract, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
 import { FACTORY_ABI, REGISTRY_ABI } from "@/lib/contracts";
 import { Concept, GenerateResult, XProfile } from "@/lib/types";
 import { WalletButton } from "./WalletButton";
@@ -25,6 +25,7 @@ const steps: Array<{ id: Step; label: string }> = [
 export function MintFlow() {
   const { address } = useAccount();
   const chainId = useChainId();
+  const publicClient = usePublicClient();
   const [step, setStep] = useState<Step>("input");
   const [handle, setHandle] = useState("");
   const [profile, setProfile] = useState<XProfile | null>(null);
@@ -56,6 +57,13 @@ export function MintFlow() {
     args: address ? [address] : undefined,
     query: { enabled: !!REGISTRY && !!address },
   });
+  const { data: handleOwner, refetch: refetchHandleOwner } = useReadContract({
+    address: REGISTRY,
+    abi: REGISTRY_ABI,
+    functionName: "handleToAddress",
+    args: profile ? [profile.handle] : undefined,
+    query: { enabled: !!REGISTRY && !!profile },
+  });
   const { writeContractAsync: writeBinding, data: bindHash, isPending: bindingPending } = useWriteContract();
   const { writeContractAsync: writeCoin, data: deployHash, isPending: deployWalletPending } = useWriteContract();
   const bindReceipt = useWaitForTransactionReceipt({ hash: bindHash });
@@ -65,7 +73,14 @@ export function MintFlow() {
   const networkReady = chainId === TARGET_CHAIN;
   const effectiveBoundHandle = boundHandleOverride || (typeof boundHandle === "string" ? boundHandle : "");
   const isBound = effectiveBoundHandle.length > 0;
-  const boundForProfile = Boolean(profile && effectiveBoundHandle.toLowerCase() === profile.handle.toLowerCase());
+  const walletOwnsProfileHandle = Boolean(address && handleOwner && String(handleOwner).toLowerCase() === address.toLowerCase());
+  const boundForProfile = Boolean(
+    profile && (
+      effectiveBoundHandle.toLowerCase() === profile.handle.toLowerCase() ||
+      walletOwnsProfileHandle ||
+      bindingConfirmed
+    )
+  );
   const bindingLocked = bindingPending || bindingSubmitted || bindReceipt.isLoading || bindingConfirmed || boundForProfile;
   const deploymentLocked = deployWalletPending || deploySubmitted || deployReceipt.isLoading || deployReceipt.isSuccess;
   const readyCount = [Boolean(address), networkReady, Boolean(profile), Boolean(verificationSignature), Boolean(result)].filter(Boolean).length;
@@ -140,10 +155,24 @@ export function MintFlow() {
     setBindingSubmitted(true);
     setNotice("Approve the binding transaction once. The button will remain locked until confirmation.");
     try {
-      await writeBinding({ address: REGISTRY, abi: REGISTRY_ABI, functionName: "register", args: [profile.handle, BigInt(verificationExpiry), verificationNonce, verificationSignature] });
+      const hash = await writeBinding({ address: REGISTRY, abi: REGISTRY_ABI, functionName: "register", args: [profile.handle, BigInt(verificationExpiry), verificationNonce, verificationSignature] });
+      setNotice("Binding transaction submitted. Waiting for X Layer confirmation…");
+      if (!publicClient) throw new Error("X Layer RPC client is unavailable. Check the transaction in the explorer before retrying.");
+      const receipt = await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 });
+      if (receipt.status !== "success") throw new Error("The binding transaction reverted on X Layer.");
+
+      setBindingConfirmed(true);
+      setBoundHandleOverride(profile.handle);
+      setBindingSubmitted(false);
+      setNotice("Handle binding confirmed on X Layer. GenLayer generation is now unlocked.");
+      setError(null);
+      setBindingError(null);
+      await Promise.all([refetchBoundHandle(), refetchHandleOwner()]);
     } catch (cause) {
       setBindingSubmitted(false);
-      setBindingError(cause instanceof Error ? cause.message : "The binding transaction was rejected or could not be submitted.");
+      setBindingConfirmed(false);
+      const message = cause instanceof Error ? cause.message : "The binding transaction was rejected or could not be confirmed.";
+      setBindingError(`${message} No second transaction was sent. Check the explorer before retrying.`);
     }
   };
 
@@ -154,17 +183,27 @@ export function MintFlow() {
       setNotice("Handle binding confirmed on X Layer. GenLayer generation is now unlocked.");
       setError(null);
       setBindingError(null);
-      void refetchBoundHandle();
+      void Promise.all([refetchBoundHandle(), refetchHandleOwner()]);
     }
     if (bindReceipt.isError) {
       setBindingSubmitted(false);
       setBindingConfirmed(false);
       setBindingError("Handle binding reverted or could not be confirmed. No second transaction was sent; review the explorer transaction before retrying.");
     }
-  }, [bindReceipt.isSuccess, bindReceipt.isError, profile, refetchBoundHandle]);
+  }, [bindReceipt.isSuccess, bindReceipt.isError, profile, refetchBoundHandle, refetchHandleOwner]);
+
+  useEffect(() => {
+    if (!profile || !walletOwnsProfileHandle) return;
+    setBindingConfirmed(true);
+    setBoundHandleOverride(profile.handle);
+    setBindingSubmitted(false);
+    setBindingError(null);
+    setNotice("This X handle is already bound to your connected wallet. GenLayer generation is unlocked.");
+  }, [profile, walletOwnsProfileHandle]);
 
   const generate = async () => {
     if (!profile || generatingRef.current) return;
+    if (!boundForProfile) return setError("Confirm the X-handle binding before starting GenLayer generation.");
     generatingRef.current = true; setError(null); setNotice("Request submitted once. Waiting for GenLayer consensus…"); setStep("generating");
     try {
       const response = await fetch("/api/generate", { method: "POST", headers: { "content-type": "application/json", "x-request-id": crypto.randomUUID() }, body: JSON.stringify(profile) });

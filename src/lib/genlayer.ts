@@ -1,6 +1,7 @@
 import { createAccount, createClient } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
 import { TransactionStatus } from "genlayer-js/types";
+import { createHash } from "node:crypto";
 import { Concept, GenerateResult, XProfile } from "./types";
 import { pollinationsImageUrl } from "./pollinations";
 
@@ -34,22 +35,41 @@ function validateConcept(value: unknown): Concept {
 }
 
 export async function generateConcept(profile: XProfile): Promise<GenerateResult> {
-  const privateKey = process.env.GENLAYER_PRIVATE_KEY || process.env.PRIVATE_KEY;
-  if (process.env.GENLAYER_ENABLED !== "true" || !GENLAYER_CONTRACT || !privateKey) {
-    throw new Error("GenLayer is not configured. Generation is unavailable until the AI brain is enabled.");
+  const platformPrivateKey = process.env.GENLAYER_PRIVATE_KEY;
+  if (process.env.GENLAYER_ENABLED !== "true" || !GENLAYER_CONTRACT || !platformPrivateKey) {
+    throw new Error("The MintMuse platform wallet or GenLayer contract is not configured.");
   }
 
   const client = createClient({
     chain: studionet,
     endpoint: GENLAYER_RPC,
-    account: createAccount(privateKey as `0x${string}`),
+    account: createAccount(platformPrivateKey as `0x${string}`),
   });
-  const requestId = `${profile.handle}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const contractRequestId = createHash("sha256")
+    .update(JSON.stringify({
+      handle: profile.handle.toLowerCase(),
+      displayName: profile.displayName || "",
+      bio: profile.bio || "",
+      followers: profile.followers || 0,
+      following: profile.following || 0,
+      recentText: (profile.recentText || "").slice(0, 2000),
+    }))
+    .digest("hex");
+  const existing = await client.readContract({ address: GENLAYER_CONTRACT, functionName: "get_concept", args: [contractRequestId] });
+  if (typeof existing === "string" && existing.trim()) {
+    const concept = validateConcept(JSON.parse(existing));
+    return {
+      concept,
+      artUrl: pollinationsImageUrl(concept.art_prompt, process.env.POLLINATIONS_IMAGE_MODEL || "flux"),
+      source: "genlayer",
+      requestId: contractRequestId,
+    };
+  }
   const hash = await client.writeContract({
     address: GENLAYER_CONTRACT,
     functionName: "generate",
     args: [
-      requestId,
+      contractRequestId,
       profile.handle,
       profile.displayName || profile.handle,
       profile.bio || "",
@@ -69,7 +89,7 @@ export async function generateConcept(profile: XProfile): Promise<GenerateResult
     throw new Error(`GenLayer consensus failed: ${receipt.statusName || receipt.status}`);
   }
 
-  const raw = await client.readContract({ address: GENLAYER_CONTRACT, functionName: "get_concept", args: [requestId] });
+  const raw = await client.readContract({ address: GENLAYER_CONTRACT, functionName: "get_concept", args: [contractRequestId] });
   const concept = validateConcept(typeof raw === "string" ? JSON.parse(raw) : raw);
   return {
     concept,

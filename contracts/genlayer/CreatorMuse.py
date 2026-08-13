@@ -20,9 +20,11 @@ class CreatorMuse(gl.Contract):
     """
 
     requests: TreeMap[str, ConceptRequest]
+    owner: Address
 
-    def __init__(self):
+    def __init__(self, owner: str = ""):
         self.requests = TreeMap[str, ConceptRequest]()
+        self.owner = Address(owner) if owner else gl.message.sender_address
 
     @gl.public.write
     def generate(
@@ -34,6 +36,10 @@ class CreatorMuse(gl.Contract):
         followers: int,
         recent_text: str,
     ) -> None:
+        if gl.message.sender_address != self.owner:
+            raise gl.vm.UserError("Only the MintMuse platform wallet may generate concepts")
+        if request_id in self.requests:
+            raise gl.vm.UserError("Duplicate GenLayer request id")
         prompt = f"""You are the AI brain for MintMuse, an on-chain creator-coin launchpad.
 A creator wants a coin minted from their X persona. Using the data below, invent a
 compelling, original creator coin.

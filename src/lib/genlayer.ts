@@ -87,7 +87,12 @@ export async function generateConcept(profile: XProfile): Promise<GenerateResult
       recentText: (profile.recentText || "").slice(0, 2000),
     }))
     .digest("hex");
-  const existing = await client.readContract({ address: GENLAYER_CONTRACT, functionName: "get_concept", args: [contractRequestId] });
+  let existing: unknown;
+  try {
+    existing = await client.readContract({ address: GENLAYER_CONTRACT, functionName: "get_concept", args: [contractRequestId] });
+  } catch (cause) {
+    throw mapGenLayerError(cause);
+  }
   if (typeof existing === "string" && existing.trim()) {
     const concept = validateConcept(JSON.parse(existing));
     return {

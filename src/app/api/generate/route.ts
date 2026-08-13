@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { XProfile } from "@/lib/types";
-import { generateConcept } from "@/lib/genlayer";
+import { generateConcept, GenLayerGenerationError } from "@/lib/genlayer";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 
@@ -38,7 +38,10 @@ export async function POST(req: NextRequest) {
     completed.set(requestId, result);
     return NextResponse.json(result);
   } catch (e) {
-    return NextResponse.json({ error: e instanceof Error ? e.message : "generation_failed", requestId: clientRequestId }, { status: 502 });
+    if (e instanceof GenLayerGenerationError) {
+      return NextResponse.json({ error: e.message, code: e.code, requestId: clientRequestId, transactionHash: e.transactionHash, retryable: e.retryable }, { status: e.code === "genlayer_rate_limited" ? 503 : 502 });
+    }
+    return NextResponse.json({ error: e instanceof Error ? e.message : "generation_failed", code: "generation_failed", requestId: clientRequestId, retryable: true }, { status: 502 });
   } finally {
     inFlight.delete(requestId);
   }

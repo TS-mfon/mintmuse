@@ -118,7 +118,7 @@ async function main() {
 
   console.log(`\n✅  CreatorMuse deployed at: ${addr}`);
   console.log(
-    `\n👉  Add this to your mintmuse .env (Vercel project):\n    NEXT_PUBLIC_GENLAYER_CONTRACT_ADDRESS=${addr}`
+    `\n👉  Add this to your mintmuse Vercel env:\n    GENLAYER_CONTRACT_ADDRESS=${addr}\n    NEXT_PUBLIC_GENLAYER_CONTRACT_ADDRESS=${addr}`
   );
 }
 

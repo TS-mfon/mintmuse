@@ -8,6 +8,38 @@ import { pollinationsImageUrl } from "./pollinations";
 const GENLAYER_RPC = process.env.GENLAYER_RPC || "https://studio.genlayer.com/api";
 const GENLAYER_CONTRACT = process.env.GENLAYER_CONTRACT_ADDRESS as `0x${string}` | undefined;
 
+const FAILED_CONSENSUS_RESULTS = new Set([
+  "TIMEOUT",
+  "DETERMINISTIC_VIOLATION",
+  "NO_MAJORITY",
+  "MAJORITY_DISAGREE",
+  "FAILURE",
+]);
+
+export class GenLayerGenerationError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly transactionHash?: string,
+    readonly retryable = true,
+  ) {
+    super(message);
+    this.name = "GenLayerGenerationError";
+  }
+}
+
+function mapGenLayerError(cause: unknown, transactionHash?: string): GenLayerGenerationError {
+  if (cause instanceof GenLayerGenerationError) return cause;
+  const message = cause instanceof Error ? cause.message : String(cause || "");
+  if (/rate limit|too many requests|429/i.test(message)) {
+    return new GenLayerGenerationError("GenLayer is rate-limited right now. Wait a moment, then retry once.", "genlayer_rate_limited", transactionHash);
+  }
+  if (/timeout|timed out/i.test(message)) {
+    return new GenLayerGenerationError("GenLayer consensus timed out. No concept was stored and MintMuse will not resubmit automatically; retry once when ready.", "genlayer_timeout", transactionHash);
+  }
+  return new GenLayerGenerationError("GenLayer could not complete consensus. No automatic retry was sent; review the transaction and retry once.", "genlayer_consensus_failed", transactionHash);
+}
+
 function validateConcept(value: unknown): Concept {
   const concept = value as Partial<Concept>;
   const tokenomics = concept?.tokenomics as Partial<Concept["tokenomics"]> | undefined;
@@ -65,36 +97,58 @@ export async function generateConcept(profile: XProfile): Promise<GenerateResult
       requestId: contractRequestId,
     };
   }
-  const hash = await client.writeContract({
-    address: GENLAYER_CONTRACT,
-    functionName: "generate",
-    args: [
-      contractRequestId,
-      profile.handle,
-      profile.displayName || profile.handle,
-      profile.bio || "",
-      Math.trunc(profile.followers || 0),
-      (profile.recentText || "").slice(0, 2000),
-    ],
-    value: 0n,
-    consensusMaxRotations: 3,
-  });
-  const receipt = await client.waitForTransactionReceipt({
-    hash,
-    status: TransactionStatus.FINALIZED,
-    retries: 120,
-    interval: 2000,
-  });
-  if (receipt.statusName !== TransactionStatus.ACCEPTED && receipt.statusName !== TransactionStatus.FINALIZED) {
-    throw new Error(`GenLayer consensus failed: ${receipt.statusName || receipt.status}`);
-  }
+  let hash: `0x${string}` | undefined;
+  try {
+    const transactionHash = await client.writeContract({
+      address: GENLAYER_CONTRACT,
+      functionName: "generate",
+      args: [
+        contractRequestId,
+        profile.handle,
+        profile.displayName || profile.handle,
+        profile.bio || "",
+        Math.trunc(profile.followers || 0),
+        (profile.recentText || "").slice(0, 800),
+      ],
+      value: 0n,
+      consensusMaxRotations: 3,
+    });
+    hash = transactionHash;
+    const receipt = await client.waitForTransactionReceipt({
+      hash: transactionHash,
+      status: TransactionStatus.FINALIZED,
+      retries: 120,
+      interval: 2000,
+    });
+    const resultName = String(receipt.resultName || "").toUpperCase();
+    if (
+      receipt.statusName !== TransactionStatus.ACCEPTED &&
+      receipt.statusName !== TransactionStatus.FINALIZED
+    ) {
+      throw new GenLayerGenerationError(`GenLayer transaction ended with status ${receipt.statusName || receipt.status}.`, "genlayer_transaction_failed", transactionHash);
+    }
+    if (FAILED_CONSENSUS_RESULTS.has(resultName)) {
+      throw new GenLayerGenerationError(
+        resultName === "TIMEOUT"
+          ? "GenLayer consensus timed out. No concept was stored and MintMuse will not resubmit automatically; retry once when ready."
+          : `GenLayer consensus rejected the result (${resultName}). No automatic retry was sent.`,
+        resultName === "TIMEOUT" ? "genlayer_timeout" : "genlayer_consensus_rejected",
+        transactionHash,
+      );
+    }
 
-  const raw = await client.readContract({ address: GENLAYER_CONTRACT, functionName: "get_concept", args: [contractRequestId] });
-  const concept = validateConcept(typeof raw === "string" ? JSON.parse(raw) : raw);
-  return {
-    concept,
-    artUrl: pollinationsImageUrl(concept.art_prompt, process.env.POLLINATIONS_IMAGE_MODEL || "flux"),
-    source: "genlayer",
-    requestId: hash,
-  };
+    const raw = await client.readContract({ address: GENLAYER_CONTRACT, functionName: "get_concept", args: [contractRequestId] });
+    if (typeof raw !== "string" || !raw.trim()) {
+      throw new GenLayerGenerationError("GenLayer finalized without storing a concept. No automatic retry was sent; retry once.", "genlayer_empty_result", transactionHash);
+    }
+    const concept = validateConcept(JSON.parse(raw));
+    return {
+      concept,
+      artUrl: pollinationsImageUrl(concept.art_prompt, process.env.POLLINATIONS_IMAGE_MODEL || "flux"),
+      source: "genlayer",
+      requestId: contractRequestId,
+    };
+  } catch (cause) {
+    throw mapGenLayerError(cause, hash);
+  }
 }

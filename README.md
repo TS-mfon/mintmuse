@@ -123,4 +123,4 @@ No database, no backend server — only GitHub + Vercel.
 
 - X Layer UsernameRegistry: `0x8864ad5224738db9C8807B2796476a5cfF960Fc8`
 - X Layer CreatorCoinFactory: `0xFdA1e070f5D6cb6c26676A138a04634BB943aBef`
-- GenLayer StudioNet CreatorMuse: `0x186511735b74E2dc6918b0272e0d3A09D8522ce9`
+- GenLayer StudioNet CreatorMuse: `0x4da2Bc172D17f91D405449A7661c6bC121c323a4`

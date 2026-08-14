@@ -13,6 +13,7 @@ const EXPLORER = process.env.NEXT_PUBLIC_XLAYER_EXPLORER || "https://www.okx.com
 const TARGET_CHAIN = Number(process.env.NEXT_PUBLIC_XLAYER_CHAIN_ID || 1952);
 
 type Step = "input" | "verify" | "preview" | "generating" | "reveal" | "deploying" | "done";
+type BindingStatus = "idle" | "checking" | "wallet" | "submitted" | "delayed" | "confirmed" | "failed";
 const steps: Array<{ id: Step; label: string }> = [
   { id: "input", label: "Profile" },
   { id: "verify", label: "Verify" },
@@ -42,11 +43,13 @@ export function MintFlow() {
   const [profilePending, setProfilePending] = useState(false);
   const [challengePending, setChallengePending] = useState(false);
   const [verificationPending, setVerificationPending] = useState(false);
-  const [bindingSubmitted, setBindingSubmitted] = useState(false);
+  const [bindingStatus, setBindingStatus] = useState<BindingStatus>("idle");
+  const [bindingHash, setBindingHash] = useState<`0x${string}` | null>(null);
   const [bindingConfirmed, setBindingConfirmed] = useState(false);
   const [boundHandleOverride, setBoundHandleOverride] = useState<string | null>(null);
   const [deploySubmitted, setDeploySubmitted] = useState(false);
   const generatingRef = useRef(false);
+  const bindingFlightRef = useRef(false);
   const [followerDisplay, setFollowerDisplay] = useState(0);
   const [followingDisplay, setFollowingDisplay] = useState(0);
 
@@ -64,9 +67,8 @@ export function MintFlow() {
     args: profile ? [profile.handle] : undefined,
     query: { enabled: !!REGISTRY && !!profile },
   });
-  const { writeContractAsync: writeBinding, data: bindHash, isPending: bindingPending } = useWriteContract();
+  const { writeContractAsync: writeBinding, isPending: bindingPending } = useWriteContract();
   const { writeContractAsync: writeCoin, data: deployHash, isPending: deployWalletPending } = useWriteContract();
-  const bindReceipt = useWaitForTransactionReceipt({ hash: bindHash });
   const deployReceipt = useWaitForTransactionReceipt({ hash: deployHash });
 
   const canonicalHandle = handle.replace(/^@/, "").trim().toLowerCase();
@@ -81,8 +83,9 @@ export function MintFlow() {
       bindingConfirmed
     )
   );
-  const bindingInProgress = bindingPending || bindingSubmitted || bindReceipt.isLoading;
-  const bindingLocked = bindingInProgress || bindingConfirmed || boundForProfile;
+  const bindingInProgress = bindingPending || bindingStatus === "checking" || bindingStatus === "wallet" || bindingStatus === "submitted";
+  const bindingDelayed = bindingStatus === "delayed";
+  const bindingLocked = bindingInProgress || bindingDelayed || bindingConfirmed || boundForProfile;
   const deploymentLocked = deployWalletPending || deploySubmitted || deployReceipt.isLoading || deployReceipt.isSuccess;
   const readyCount = [Boolean(address), networkReady, Boolean(profile), Boolean(verificationSignature), Boolean(result)].filter(Boolean).length;
   const statusText = step === "generating" ? "GenLayer is reaching consensus…" : step === "deploying" ? "X Layer is confirming the mint…" : notice;
@@ -115,7 +118,7 @@ export function MintFlow() {
       const response = await fetch(`/api/xprofile?handle=${encodeURIComponent(canonicalHandle)}`, { cache: "no-store" });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error === "profile_not_found" ? `We couldn't find @${canonicalHandle}.` : data.error || "Profile lookup failed.");
-      setHandle(data.handle || canonicalHandle); setProfile(data); setResult(null); setVerificationSignature(null); setBindingSubmitted(false); setBindingConfirmed(false); setBoundHandleOverride(null); setStep("verify");
+      setHandle(data.handle || canonicalHandle); setProfile(data); setResult(null); setVerificationSignature(null); setBindingStatus("idle"); setBindingHash(null); setBindingConfirmed(false); setBoundHandleOverride(null); setStep("verify");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Profile lookup failed."); }
     finally { setProfilePending(false); }
   };
@@ -147,57 +150,111 @@ export function MintFlow() {
     finally { setVerificationPending(false); }
   };
 
-  const bindHandle = async () => {
-    if (bindingLocked) return;
-    if (!REGISTRY || !address || !profile || !verificationSignature || !verificationNonce || !verificationExpiry) return setError("Complete X verification first.");
-    if (!networkReady) return setError(`Switch your wallet to X Layer testnet (${TARGET_CHAIN}).`);
-    setBindingError(null);
+  const markBindingConfirmed = async () => {
+    if (!profile) return;
+    setBindingConfirmed(true);
+    setBoundHandleOverride(profile.handle);
+    setBindingStatus("confirmed");
+    setNotice("Handle binding confirmed on X Layer. GenLayer generation is now unlocked.");
     setError(null);
-    setBindingSubmitted(true);
-    setNotice("Approve the binding transaction once. The button will remain locked until confirmation.");
-    try {
-      const hash = await writeBinding({ address: REGISTRY, abi: REGISTRY_ABI, functionName: "register", args: [profile.handle, BigInt(verificationExpiry), verificationNonce, verificationSignature] });
-      setNotice("Binding transaction submitted. Waiting for X Layer confirmation…");
-      if (!publicClient) throw new Error("X Layer RPC client is unavailable. Check the transaction in the explorer before retrying.");
-      const receipt = await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 });
-      if (receipt.status !== "success") throw new Error("The binding transaction reverted on X Layer.");
+    setBindingError(null);
+    await Promise.all([refetchBoundHandle(), refetchHandleOwner()]);
+  };
 
-      setBindingConfirmed(true);
-      setBoundHandleOverride(profile.handle);
-      setBindingSubmitted(false);
-      setNotice("Handle binding confirmed on X Layer. GenLayer generation is now unlocked.");
-      setError(null);
-      setBindingError(null);
-      await Promise.all([refetchBoundHandle(), refetchHandleOwner()]);
-    } catch (cause) {
-      setBindingSubmitted(false);
-      setBindingConfirmed(false);
-      const message = cause instanceof Error ? cause.message : "The binding transaction was rejected or could not be confirmed.";
-      setBindingError(`${message} No second transaction was sent. Check the explorer before retrying.`);
+  const reconcileBinding = async () => {
+    if (!REGISTRY || !publicClient || !address || !profile) return false;
+    try {
+      const [walletHandle, owner] = await Promise.all([
+        publicClient.readContract({ address: REGISTRY, abi: REGISTRY_ABI, functionName: "addressToHandle", args: [address] }),
+        publicClient.readContract({ address: REGISTRY, abi: REGISTRY_ABI, functionName: "handleToAddress", args: [profile.handle] }),
+      ]);
+      if (String(walletHandle).toLowerCase() === profile.handle.toLowerCase() || String(owner).toLowerCase() === address.toLowerCase()) {
+        await markBindingConfirmed();
+        return true;
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  };
+
+  const failBinding = (message: string) => {
+    setBindingStatus("failed");
+    setBindingConfirmed(false);
+    setNotice(null);
+    setBindingError(message);
+  };
+
+  const checkBindingStatus = async () => {
+    if (!bindingHash || !publicClient || bindingFlightRef.current) return;
+    bindingFlightRef.current = true;
+    setBindingStatus("checking");
+    setBindingError(null);
+    setNotice("Checking the existing X Layer transaction. No new transaction will be sent.");
+    try {
+      if (await reconcileBinding()) return;
+      const receipt = await publicClient.getTransactionReceipt({ hash: bindingHash });
+      if (receipt.status === "success") await markBindingConfirmed();
+      else failBinding("The binding transaction reverted on X Layer. Review the explorer details before retrying.");
+    } catch {
+      setBindingStatus("delayed");
+      setNotice(null);
+      setBindingError("X Layer has not returned a final receipt yet. The original transaction remains locked; check its explorer status instead of signing another one.");
+    } finally {
+      bindingFlightRef.current = false;
     }
   };
 
-  useEffect(() => {
-    if (bindReceipt.isSuccess && profile) {
-      setBindingConfirmed(true);
-      setBoundHandleOverride(profile.handle);
-      setNotice("Handle binding confirmed on X Layer. GenLayer generation is now unlocked.");
-      setError(null);
-      setBindingError(null);
-      void Promise.all([refetchBoundHandle(), refetchHandleOwner()]);
+  const bindHandle = async () => {
+    if (bindingLocked || bindingFlightRef.current) return;
+    if (!REGISTRY || !address || !profile || !verificationSignature || !verificationNonce || !verificationExpiry) return setError("Complete X verification first.");
+    if (!networkReady) return setError(`Switch your wallet to X Layer testnet (${TARGET_CHAIN}).`);
+    if (!publicClient) return setError("X Layer RPC client is unavailable.");
+    bindingFlightRef.current = true;
+    setBindingError(null);
+    setError(null);
+    setNotice("Checking the verified binding before opening your wallet…");
+    setBindingStatus("checking");
+    let submittedHash: `0x${string}` | null = null;
+    try {
+      if (await reconcileBinding()) return;
+      await publicClient.simulateContract({ account: address, address: REGISTRY, abi: REGISTRY_ABI, functionName: "register", args: [profile.handle, BigInt(verificationExpiry), verificationNonce, verificationSignature] });
+      setBindingStatus("wallet");
+      setNotice("Approve this binding once. MintMuse disables repeat submissions immediately.");
+      const hash = await writeBinding({ address: REGISTRY, abi: REGISTRY_ABI, functionName: "register", args: [profile.handle, BigInt(verificationExpiry), verificationNonce, verificationSignature] });
+      submittedHash = hash;
+      setBindingHash(hash);
+      setBindingStatus("submitted");
+      setNotice("Binding transaction submitted. Waiting for X Layer confirmation…");
+      const receipt = await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 });
+      if (receipt.status !== "success") throw new Error("The binding transaction reverted on X Layer.");
+      await markBindingConfirmed();
+    } catch (cause) {
+      setNotice(null);
+      if (await reconcileBinding()) return;
+      const message = cause instanceof Error ? cause.message : "The binding transaction was rejected or could not be confirmed.";
+      if (submittedHash) {
+        try {
+          const receipt = await publicClient.getTransactionReceipt({ hash: submittedHash });
+          if (receipt.status === "success") await markBindingConfirmed();
+          else failBinding("The binding transaction reverted on X Layer. No second transaction was sent; review the explorer details before retrying.");
+        } catch {
+          setBindingStatus("delayed");
+          setBindingError("Confirmation is taking longer than expected. The original transaction is still locked. Use “Check transaction status” or the explorer; do not sign another binding.");
+        }
+      } else {
+        failBinding(`${message} No transaction was submitted.`);
+      }
+    } finally {
+      bindingFlightRef.current = false;
     }
-    if (bindReceipt.isError) {
-      setBindingSubmitted(false);
-      setBindingConfirmed(false);
-      setBindingError("Handle binding reverted or could not be confirmed. No second transaction was sent; review the explorer transaction before retrying.");
-    }
-  }, [bindReceipt.isSuccess, bindReceipt.isError, profile, refetchBoundHandle, refetchHandleOwner]);
+  };
 
   useEffect(() => {
     if (!profile || !walletOwnsProfileHandle) return;
     setBindingConfirmed(true);
     setBoundHandleOverride(profile.handle);
-    setBindingSubmitted(false);
+    setBindingStatus("confirmed");
     setBindingError(null);
     setNotice("This X handle is already bound to your connected wallet. GenLayer generation is unlocked.");
   }, [profile, walletOwnsProfileHandle]);
@@ -254,7 +311,7 @@ export function MintFlow() {
           <div className="panel main-panel">
             {step === "input" && <InputStage handle={handle} setHandle={setHandle} onFetch={fetchProfile} walletMissing={!address} pending={profilePending} />}
             {step === "verify" && profile && <VerifyStage profile={profile} code={challengeCode} onStart={startVerification} onConfirm={confirmVerification} challengePending={challengePending} verificationPending={verificationPending} verified={Boolean(verificationSignature)} />}
-            {step === "preview" && profile && <PreviewStage profile={profile} followerDisplay={followerDisplay} followingDisplay={followingDisplay} bound={boundForProfile} onBind={bindHandle} onGenerate={generate} binding={bindingLocked} bindingInProgress={bindingInProgress} confirming={bindReceipt.isLoading} verified={Boolean(verificationSignature)} />}
+            {step === "preview" && profile && <PreviewStage profile={profile} followerDisplay={followerDisplay} followingDisplay={followingDisplay} bound={boundForProfile} onBind={bindHandle} onGenerate={generate} onCheckBinding={checkBindingStatus} binding={bindingLocked} bindingStatus={bindingStatus} bindingHash={bindingHash} verified={Boolean(verificationSignature)} />}
             {step === "generating" && <ProgressStage label="GenLayer consensus" detail="Your request is being validated across the AI network. Do not refresh or submit again." />}
             {step === "reveal" && result && <RevealStage result={result} onDeploy={deploy} disabled={deploymentLocked} />}
             {step === "deploying" && <ProgressStage label="X Layer settlement" detail={deployHash ? "Transaction submitted. Waiting for a confirmed receipt." : "Approve the transaction in your wallet."} hash={deployHash} />}
@@ -273,7 +330,7 @@ export function MintFlow() {
 function Header({ networkReady }: { networkReady: boolean }) { return <header className="topbar"><div className="brand"><span className="brand-mark">M</span><span>MintMuse</span></div><div className="header-actions"><div className={networkReady ? "network ok" : "network"}><span /> X Layer testnet · {TARGET_CHAIN}</div><WalletButton /></div></header>; }
 function InputStage({ handle, setHandle, onFetch, walletMissing, pending }: { handle: string; setHandle: (v: string) => void; onFetch: () => void; walletMissing: boolean; pending: boolean }) { return <div><h2>Analyze a creator profile</h2><p className="muted">Start with public X data. Metrics remain factual; only the lore and artwork are AI-generated.</p>{walletMissing && <p className="wallet-required" role="status">Connect your wallet above before analyzing a profile. Your wallet is required to create the X-handle binding.</p>}<label htmlFor="handle">X handle</label><div className="input-row"><input id="handle" className="input" disabled={pending} placeholder="@yourhandle" value={handle} onChange={(e) => setHandle(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onFetch()} /><button className="btn-primary" onClick={onFetch} disabled={walletMissing || pending}>{walletMissing ? "Connect wallet above" : pending ? "Analyzing…" : "Analyze"}</button></div></div>; }
 function VerifyStage({ profile, code, onStart, onConfirm, challengePending, verificationPending, verified }: { profile: XProfile; code: string | null; onStart: () => void; onConfirm: () => void; challengePending: boolean; verificationPending: boolean; verified: boolean }) { return <div><h2>Verify the X identity</h2><p className="muted">Add this exact code to the public bio, then check it again. This prevents wallets from claiming someone else’s handle.</p><div className="profile-mini"><img src={profile.avatar || ""} alt="" /><div><strong>{profile.displayName || profile.handle}</strong><span>@{profile.handle}</span></div></div>{code ? <div className="code-box"><span>{code}</span><button className="btn-ghost" disabled={verificationPending} onClick={() => navigator.clipboard?.writeText(code)}>Copy</button><button className="btn-primary" disabled={verificationPending || verified} onClick={onConfirm}>{verified ? "Bio verified" : verificationPending ? "Checking bio…" : "Check bio"}</button></div> : <button className="btn-primary" disabled={challengePending} onClick={onStart}>{challengePending ? "Creating code…" : "Generate verification code"}</button>}</div>; }
-function PreviewStage({ profile, followerDisplay, followingDisplay, bound, verified, onBind, onGenerate, binding, bindingInProgress, confirming }: { profile: XProfile; followerDisplay: number; followingDisplay: number; bound: boolean; verified: boolean; onBind: () => void; onGenerate: () => void; binding: boolean; bindingInProgress: boolean; confirming: boolean }) { return <div><h2>Signal report</h2><div className="profile-mini"><img src={profile.avatar || ""} alt="" /><div><strong>{profile.displayName || profile.handle}</strong><span>@{profile.handle}</span></div></div><p className="bio">{profile.bio || "Bio unavailable"}</p><div className="metric-grid"><Metric label="Followers" value={profile.followers == null ? "Unavailable" : followerDisplay.toLocaleString()} source="X profile" /><Metric label="Following" value={profile.following == null ? "Unavailable" : followingDisplay.toLocaleString()} source="X profile" /></div><div className="action-stack"><button className="btn-primary" disabled={!verified || binding || bound} onClick={onBind}>{bound ? "Handle bound ✓" : confirming ? "Confirming on X Layer…" : bindingInProgress ? "Transaction submitted…" : verified ? "Bind verified handle" : "Verify bio first"}</button><button className="btn-ghost" disabled={!bound || bindingInProgress} onClick={onGenerate}>{bound ? "Generate with GenLayer" : "Available after binding"}</button></div>{bindingInProgress && !bound && <p className="pending-note" aria-live="polite">Do not submit again. MintMuse is tracking the current binding transaction until it confirms or fails.</p>}</div>; }
+function PreviewStage({ profile, followerDisplay, followingDisplay, bound, verified, onBind, onGenerate, onCheckBinding, binding, bindingStatus, bindingHash }: { profile: XProfile; followerDisplay: number; followingDisplay: number; bound: boolean; verified: boolean; onBind: () => void; onGenerate: () => void; onCheckBinding: () => void; binding: boolean; bindingStatus: BindingStatus; bindingHash: `0x${string}` | null }) { const pending = bindingStatus === "checking" || bindingStatus === "wallet" || bindingStatus === "submitted"; const delayed = bindingStatus === "delayed"; const bindLabel = bound ? "Handle bound ✓" : bindingStatus === "checking" ? "Checking current binding…" : bindingStatus === "wallet" ? "Approve in wallet…" : bindingStatus === "submitted" ? "Confirming on X Layer…" : delayed ? "Confirmation delayed" : verified ? "Bind verified handle" : "Verify bio first"; return <div><h2>Signal report</h2><div className="profile-mini"><img src={profile.avatar || ""} alt="" /><div><strong>{profile.displayName || profile.handle}</strong><span>@{profile.handle}</span></div></div><p className="bio">{profile.bio || "Bio unavailable"}</p><div className="metric-grid"><Metric label="Followers" value={profile.followers == null ? "Unavailable" : followerDisplay.toLocaleString()} source="X profile" /><Metric label="Following" value={profile.following == null ? "Unavailable" : followingDisplay.toLocaleString()} source="X profile" /></div><div className="action-stack"><button className="btn-primary" disabled={!verified || binding || bound} onClick={onBind}>{bindLabel}</button>{delayed && <button className="btn-ghost" onClick={onCheckBinding}>Check transaction status</button>}<button className="btn-ghost" disabled={!bound || pending || delayed} onClick={onGenerate}>{bound ? "Generate with GenLayer" : "Available after binding"}</button></div>{bindingHash && !bound && <a href={`${EXPLORER}/tx/${bindingHash}`} target="_blank" rel="noreferrer" className="link binding-link">View binding transaction ↗</a>}{(pending || delayed) && !bound && <p className="pending-note" aria-live="polite">{delayed ? "MintMuse will check this existing transaction without sending another one." : "Do not submit again. MintMuse is tracking the current binding transaction until it confirms or fails."}</p>}</div>; }
 function Metric({ label, value, source }: { label: string; value: string; source: string }) { return <div className="metric"><span>{label}</span><strong>{value}</strong><small>{source}</small></div>; }
 function ProgressStage({ label, detail, hash }: { label: string; detail: string; hash?: `0x${string}` }) { return <div className="progress-stage"><div className="spinner" /><h2>{label}</h2><p className="muted">{detail}</p>{hash && <a href={`${EXPLORER}/tx/${hash}`} target="_blank" rel="noreferrer" className="link">View transaction ↗</a>}</div>; }
 function RevealStage({ result, onDeploy, disabled }: { result: GenerateResult; onDeploy: () => void; disabled: boolean }) { const concept: Concept = result.concept; return <div><div className="art-frame"><img src={result.artUrl} alt={`AI-generated artwork for ${concept.token_name}`} /></div><p className="source-tag">AI generated · GenLayer consensus</p><h2>{concept.token_name} <span>${concept.ticker}</span></h2><p className="bio">{concept.narrative}</p><div className="metric-grid"><Metric label="Supply" value={concept.tokenomics.total_supply.toLocaleString()} source="Proposed preset" /><Metric label="Curve" value="Bonding" source="X Layer contract" /></div><button className="btn-primary full" disabled={disabled} onClick={onDeploy}>{disabled ? "Deployment in progress…" : "Deploy proposed coin"}</button></div>; }

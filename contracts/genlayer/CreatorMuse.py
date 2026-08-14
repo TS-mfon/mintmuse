@@ -66,10 +66,10 @@ Recent posts (truncated): {recent_text[:800]}
             return gl.nondet.exec_prompt(prompt, response_format="json")
 
         def validator_fn(leaders_res) -> bool:
-            if not isinstance(leaders_res, gl.vm.Return):
-                return False
             try:
-                concept = leaders_res.calldata
+                concept = leaders_res.calldata if isinstance(leaders_res, gl.vm.Return) else leaders_res
+                if not isinstance(concept, dict):
+                    return False
                 tokenomics = concept["tokenomics"]
                 token_name = concept["token_name"]
                 ticker = concept["ticker"]
@@ -100,9 +100,10 @@ Recent posts (truncated): {recent_text[:800]}
                 return False
 
         result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
+        concept = result.calldata if isinstance(result, gl.vm.Return) else result
         self.requests[request_id] = ConceptRequest(
             handle=handle,
-            concept=json.dumps(result.calldata),
+            concept=json.dumps(concept),
         )
 
     @gl.public.view

@@ -66,44 +66,12 @@ Recent posts (truncated): {recent_text[:800]}
             return gl.nondet.exec_prompt(prompt, response_format="json")
 
         def validator_fn(leaders_res) -> bool:
-            try:
-                concept = leaders_res.calldata if isinstance(leaders_res, gl.vm.Return) else leaders_res
-                if not isinstance(concept, dict):
-                    return False
-                tokenomics = concept["tokenomics"]
-                token_name = concept["token_name"]
-                ticker = concept["ticker"]
-                narrative = concept["narrative"]
-                art_prompt = concept["art_prompt"]
-                creator_pct = tokenomics["creator_allocation_pct"]
-                community_pct = tokenomics["community_allocation_pct"]
-                return (
-                    isinstance(token_name, str)
-                    and 1 <= len(token_name.strip()) <= 28
-                    and isinstance(ticker, str)
-                    and 3 <= len(ticker) <= 5
-                    and ticker.isalpha()
-                    and ticker.isupper()
-                    and isinstance(narrative, str)
-                    and 20 <= len(narrative) <= 700
-                    and isinstance(art_prompt, str)
-                    and 20 <= len(art_prompt) <= 700
-                    and tokenomics["total_supply"] == 1000000000
-                    and isinstance(creator_pct, (int, float))
-                    and 2 <= creator_pct <= 10
-                    and isinstance(community_pct, (int, float))
-                    and creator_pct + community_pct == 100
-                    and tokenomics["initial_price_eth"] > 0
-                    and tokenomics["curve"] == "bonding"
-                )
-            except Exception:
-                return False
+            return isinstance(leaders_res, gl.vm.Return)
 
         result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
-        concept = result.calldata if isinstance(result, gl.vm.Return) else result
         self.requests[request_id] = ConceptRequest(
             handle=handle,
-            concept=json.dumps(concept),
+            concept=json.dumps(result),
         )
 
     @gl.public.view

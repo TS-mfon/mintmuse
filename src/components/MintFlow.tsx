@@ -14,6 +14,7 @@ const TARGET_CHAIN = Number(process.env.NEXT_PUBLIC_XLAYER_CHAIN_ID || 1952);
 
 type Step = "input" | "verify" | "preview" | "generating" | "reveal" | "deploying" | "done";
 type BindingStatus = "idle" | "checking" | "wallet" | "submitted" | "delayed" | "confirmed" | "failed";
+type RegistryOwnership = { walletHandle: string; owner: string };
 const steps: Array<{ id: Step; label: string }> = [
   { id: "input", label: "Profile" },
   { id: "verify", label: "Verify" },
@@ -161,21 +162,63 @@ export function MintFlow() {
     await Promise.all([refetchBoundHandle(), refetchHandleOwner()]);
   };
 
-  const reconcileBinding = async () => {
-    if (!REGISTRY || !publicClient || !address || !profile) return false;
+  const readRegistryOwnership = async (): Promise<RegistryOwnership | null> => {
+    if (!REGISTRY || !publicClient || !address || !profile) return null;
     try {
       const [walletHandle, owner] = await Promise.all([
         publicClient.readContract({ address: REGISTRY, abi: REGISTRY_ABI, functionName: "addressToHandle", args: [address] }),
         publicClient.readContract({ address: REGISTRY, abi: REGISTRY_ABI, functionName: "handleToAddress", args: [profile.handle] }),
       ]);
-      if (String(walletHandle).toLowerCase() === profile.handle.toLowerCase() || String(owner).toLowerCase() === address.toLowerCase()) {
-        await markBindingConfirmed();
-        return true;
-      }
+      return { walletHandle: String(walletHandle), owner: String(owner) };
     } catch {
-      return false;
+      return null;
+    }
+  };
+
+  const reconcileBinding = async () => {
+    if (!address || !profile) return false;
+    const ownership = await readRegistryOwnership();
+    if (
+      ownership && (
+        ownership.walletHandle.toLowerCase() === profile.handle.toLowerCase() ||
+        ownership.owner.toLowerCase() === address.toLowerCase()
+      )
+    ) {
+      await markBindingConfirmed();
+      return true;
     }
     return false;
+  };
+
+  const bindingErrorMessage = async (cause: unknown) => {
+    const raw = cause instanceof Error ? `${cause.name} ${cause.message}` : String(cause || "");
+    const ownership = await readRegistryOwnership();
+    const zeroAddress = "0x0000000000000000000000000000000000000000";
+    const existingOwner = ownership?.owner?.toLowerCase();
+    const walletHandle = ownership?.walletHandle?.trim();
+
+    if (/handle taken/i.test(raw)) {
+      if (existingOwner && existingOwner !== zeroAddress && existingOwner !== address?.toLowerCase()) {
+        return `@${profile?.handle} is already bound to another wallet (${ownership?.owner.slice(0, 6)}…${ownership?.owner.slice(-4)}). No transaction was submitted.`;
+      }
+      return `X Layer reported that @${profile?.handle} is already registered, but the current RPC could not confirm its owner. Refresh once and check again; MintMuse did not submit a transaction.`;
+    }
+    if (/wallet already registered/i.test(raw)) {
+      return walletHandle
+        ? `This wallet is already bound to @${walletHandle}. Connect the wallet that owns @${profile?.handle}, or continue with the existing bound handle.`
+        : "This wallet is already registered to an X handle. Refresh to load the existing binding; no transaction was submitted.";
+    }
+    if (/attestation expired/i.test(raw)) return "Your X verification expired. Generate a new verification code and verify the bio again.";
+    if (/attestation used/i.test(raw)) return "This verification proof was already used. Refresh to check the existing binding, or create a new verification code.";
+    if (/invalid attestation|invalid signature/i.test(raw)) return "The verification signature does not match this wallet or registry. Verify the X bio again with the currently connected wallet.";
+    if (/invalid handle/i.test(raw)) return "The X handle must contain only 1–15 letters, numbers, or underscores.";
+    if (/user rejected|user denied|rejected the request|4001/i.test(raw)) return "You canceled the wallet request. No transaction was submitted.";
+    if (/insufficient funds/i.test(raw)) return "Your wallet does not have enough X Layer testnet OKB for gas.";
+    if (/chain|network/i.test(raw) && /mismatch|unsupported|configured|wrong/i.test(raw)) return `Switch your wallet to X Layer testnet (${TARGET_CHAIN}) and try again.`;
+    if (/timeout|timed out/i.test(raw)) return "X Layer confirmation is delayed. Check the existing transaction instead of signing another one.";
+    if (/rpc|fetch|network|request failed|internal error/i.test(raw)) return "X Layer RPC is temporarily unavailable. No transaction was submitted; wait briefly and try again.";
+    if (/revert/i.test(raw)) return "The registry rejected this binding. Refresh the on-chain ownership status before trying again.";
+    return "MintMuse could not prepare the binding transaction. No transaction was submitted; refresh and try again.";
   };
 
   const failBinding = (message: string) => {
@@ -232,7 +275,6 @@ export function MintFlow() {
     } catch (cause) {
       setNotice(null);
       if (await reconcileBinding()) return;
-      const message = cause instanceof Error ? cause.message : "The binding transaction was rejected or could not be confirmed.";
       if (submittedHash) {
         try {
           const receipt = await publicClient.getTransactionReceipt({ hash: submittedHash });
@@ -243,7 +285,7 @@ export function MintFlow() {
           setBindingError("Confirmation is taking longer than expected. The original transaction is still locked. Use “Check transaction status” or the explorer; do not sign another binding.");
         }
       } else {
-        failBinding(`${message} No transaction was submitted.`);
+        failBinding(await bindingErrorMessage(cause));
       }
     } finally {
       bindingFlightRef.current = false;

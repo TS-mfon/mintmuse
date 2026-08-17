@@ -41,9 +41,14 @@ class CreatorMuse(gl.Contract):
         if request_id in self.requests:
             raise gl.vm.UserError("Duplicate GenLayer request id")
         prompt = f"""You are the AI brain for MintMuse, an on-chain creator-coin launchpad.
-Using the creator's public profile below, produce one concise, original coin concept.
+Create one concise, original creator-coin concept grounded in this public profile.
 
-Return ONLY a JSON object (no markdown) with exactly these keys:
+Creator: {display_name} (@{handle})
+Followers: {followers}
+Bio: {bio}
+Recent posts (truncated): {recent_text[:800]}
+
+Return ONLY a valid JSON object with exactly these keys:
 - "token_name": string, evocative coin name (max 28 chars)
 - "ticker": string, 3-5 uppercase letters, unique-feeling
 - "narrative": string, exactly 2 concise sentences tying the creator's vibe to the coin
@@ -54,24 +59,30 @@ Return ONLY a JSON object (no markdown) with exactly these keys:
     "initial_price_eth" (number, small, e.g. 0.000001),
     "curve" (string: "bonding")
 - "art_prompt": string, one vivid text-to-image prompt for the coin artwork
-  (the creator as a mythic mascot, neon crypto-art, no text in image)
-
-Creator: {display_name} (@{handle})
-Followers: {followers}
-Bio: {bio}
-Recent posts (truncated): {recent_text[:800]}
-"""
+  (the creator as a mythic mascot, neon crypto-art, no text in image)."""
 
         def leader_fn():
-            return gl.nondet.exec_prompt(prompt, response_format="json")
+            return gl.nondet.exec_prompt(prompt)
 
-        def validator_fn(leaders_res) -> bool:
-            return isinstance(leaders_res, gl.vm.Return)
-
-        result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
+        result = gl.eq_principle.prompt_comparative(
+            leader_fn,
+            principle=(
+                "Both answers may use different creative names, tickers, lore, and imagery. "
+                "Agree when the leader answer is valid JSON with every requested key, is "
+                "grounded in the supplied creator profile, uses a 3-5 character uppercase "
+                "ticker, sets total_supply to 1000000000, keeps creator allocation between "
+                "2 and 10, makes both allocations total 100, and sets curve to bonding. "
+                "Disagree only when the leader answer violates those requirements or invents "
+                "unrelated profile facts."
+            ),
+        )
+        try:
+            concept = json.loads(result)
+        except Exception:
+            raise gl.vm.UserError("GenLayer returned invalid concept JSON")
         self.requests[request_id] = ConceptRequest(
             handle=handle,
-            concept=json.dumps(result),
+            concept=json.dumps(concept),
         )
 
     @gl.public.view

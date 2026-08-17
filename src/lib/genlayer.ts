@@ -87,21 +87,26 @@ export async function generateConcept(profile: XProfile): Promise<GenerateResult
       recentText: (profile.recentText || "").slice(0, 2000),
     }))
     .digest("hex");
-  let existing: unknown;
-  try {
-    existing = await client.readContract({ address: GENLAYER_CONTRACT, functionName: "get_concept", args: [contractRequestId] });
-  } catch (cause) {
-    throw mapGenLayerError(cause);
-  }
-  if (typeof existing === "string" && existing.trim()) {
-    const concept = validateConcept(JSON.parse(existing));
+  const resultFromStoredConcept = (raw: unknown): GenerateResult | null => {
+    if (typeof raw !== "string" || !raw.trim()) return null;
+    const concept = validateConcept(JSON.parse(raw));
     return {
       concept,
       artUrl: pollinationsImageUrl(concept.art_prompt, process.env.POLLINATIONS_IMAGE_MODEL || "flux"),
       source: "genlayer",
       requestId: contractRequestId,
     };
+  };
+  const readStoredConcept = async () => resultFromStoredConcept(
+    await client.readContract({ address: GENLAYER_CONTRACT, functionName: "get_concept", args: [contractRequestId] }),
+  );
+  let existing: GenerateResult | null;
+  try {
+    existing = await readStoredConcept();
+  } catch (cause) {
+    throw mapGenLayerError(cause);
   }
+  if (existing) return existing;
   let hash: `0x${string}` | undefined;
   try {
     const transactionHash = await client.writeContract({
@@ -142,18 +147,24 @@ export async function generateConcept(profile: XProfile): Promise<GenerateResult
       );
     }
 
-    const raw = await client.readContract({ address: GENLAYER_CONTRACT, functionName: "get_concept", args: [contractRequestId] });
-    if (typeof raw !== "string" || !raw.trim()) {
+    const stored = await readStoredConcept();
+    if (!stored) {
       throw new GenLayerGenerationError("GenLayer finalized without storing a concept. No automatic retry was sent; retry once.", "genlayer_empty_result", transactionHash);
     }
-    const concept = validateConcept(JSON.parse(raw));
-    return {
-      concept,
-      artUrl: pollinationsImageUrl(concept.art_prompt, process.env.POLLINATIONS_IMAGE_MODEL || "flux"),
-      source: "genlayer",
-      requestId: contractRequestId,
-    };
+    return stored;
   } catch (cause) {
+    const shouldRecover = hash && !(cause instanceof GenLayerGenerationError && ["genlayer_consensus_rejected", "genlayer_transaction_failed"].includes(cause.code));
+    if (shouldRecover) {
+      for (const delayMs of [2_000, 5_000, 10_000]) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        try {
+          const stored = await readStoredConcept();
+          if (stored) return stored;
+        } catch {
+          // Read-only recovery continues; generate() is never called twice.
+        }
+      }
+    }
     throw mapGenLayerError(cause, hash);
   }
 }
